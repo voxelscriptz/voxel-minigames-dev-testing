@@ -16,6 +16,7 @@ window.addEventListener('load',function(){var i=document.getElementById('info');
   if(typeof AFRAME==='undefined')i.innerHTML+='<br><span style="color:#ff9">A-Frame failed to load. Check your connection, or put aframe.min.js next to this file.</span>';
   else window.__errs.forEach(function(m){i.innerHTML+='<br><span style="color:#ff9">Error: '+m+'</span>';});});
 </script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/aframe@1.5.0/dist/aframe.min.js"></script>
 <script>window.AFRAME||document.write('<script src="https://aframe.io/releases/1.5.0/aframe.min.js"><\/script>');</script>
 <script>window.AFRAME||document.write('<script src="https://unpkg.com/aframe@1.5.0/dist/aframe.min.js"><\/script>');</script>
@@ -136,22 +137,58 @@ AFRAME.registerComponent('gorilla',{
     this.spawnTicks=0;this.spawnHead=1.2;this.alarmT=0;this.partyT=0;this.nextDrip=4;this.nextKnock=35;
     this.mineCool=0;this.swing=0;this.counts={3:0,4:0,5:0,6:0};this.mined=0;this.debris=[];this.needRebuild=false;
     this.mouseMine=false;this.xHeld=false;this.adminOpen=false;this.fadeState='idle';this.fadeA=0;this.ready=false;
-    this.chestEsp=false;this.fastMine=false;this.flyEnabled=false;this.noclip=false;this.godMode=false;this.fullBright=false;this.sticks={left:{x:0,y:0},right:{x:0,y:0}};
+    this.chestEsp=false;this.fastMine=false;this.flyEnabled=false;this.noclip=false;this.godMode=false;this.fullBright=false;this.triggerPlatforms=false;this.triggerCooldown=0;this.sticks={left:{x:0,y:0},right:{x:0,y:0}};
+    this.peer=null;this.peerConn=null;this.remotePlayers=new Map();this.netTimer=0;this.roomCode='';
+    this.mouseLocked=false;this.pointerLockWanted=false;this.mouseYaw=0;this.mousePitch=0;
     this.presses=0;this.quacks=0;this.discoN=0;this.mirrorN=0;this.hintI=0;this.interOf=new Map();this.panelOf=new Map();
     this.save=this.loadSave();this.rc=new THREE.Raycaster();
-    this.buildLobby();this.buildMine();this.buildAvatar();this.buildUI();this.buildChestESP();
+    this.buildLobby();this.buildMine();this.buildAvatar();this.buildUI();this.buildChestESP();this.buildTriggerPlatforms();
     // input
     const unlock=()=>this.unlockAudio();
-    window.addEventListener('keydown',e=>{this.keys[e.code]=true;unlock();if(e.code==='Space')e.preventDefault();});
+    window.addEventListener('keydown',e=>{
+      this.keys[e.code]=true;unlock();
+      if(e.code==='Space')e.preventDefault();
+      if(e.code==='ControlLeft'&&!this.el.is('vr-mode')){
+        e.preventDefault();
+        if(document.pointerLockElement===this.el.canvas){document.exitPointerLock();this.pointerLockWanted=false;}
+        else{this.pointerLockWanted=true;this.requestMouseLock();}
+      }
+    });
     window.addEventListener('keyup',e=>{this.keys[e.code]=false;});
-    window.addEventListener('mousedown',e=>{if(e.button!==0)return;unlock();this.down=[e.clientX,e.clientY];
+    window.addEventListener('contextmenu',e=>{if(!this.el.is('vr-mode'))e.preventDefault();});
+    document.addEventListener('pointerlockchange',()=>{
+      this.mouseLocked=document.pointerLockElement===this.el.canvas;
+      if(this.mouseLocked){this.mouseYaw=this.rig.rotation.y;this.mousePitch=this.camEl?this.camEl.object3D.rotation.x:0;this.say('Mouse lock ON — move mouse to look around; Left Ctrl releases.');}
+      else if(!this.pointerLockWanted)this.say('Mouse lock OFF — press Left Ctrl to lock again.');
+    });
+    document.addEventListener('pointerlockerror',()=>{this.pointerLockWanted=false;this.say('Mouse lock was blocked. Click the game, then press Left Ctrl.');});
+    document.addEventListener('mousemove',e=>{
+      if(!this.mouseLocked||this.el.is('vr-mode'))return;
+      this.mouseYaw-=e.movementX*.0025;
+      this.mousePitch-=e.movementY*.0025;
+      this.mousePitch=Math.max(-1.45,Math.min(1.45,this.mousePitch));
+      if(this.rig)this.rig.rotation.y=this.mouseYaw;
+      const cam=document.getElementById('cam');
+      if(cam){
+        // A-Frame object3D rotation uses radians; look-controls is disabled on desktop.
+        cam.object3D.rotation.order='YXZ';
+        cam.object3D.rotation.x=this.mousePitch;
+        cam.object3D.rotation.y=0;
+        cam.object3D.rotation.z=0;
+      }
+    });
+    window.addEventListener('mousedown',e=>{
+      if(!this.el.is('vr-mode')&&this.pointerLockWanted&&document.pointerLockElement!==this.el.canvas)this.requestMouseLock();
+      if(e.button!==0)return;unlock();this.down=[e.clientX,e.clientY];
       this.tgt=this.ready&&!this.el.is('vr-mode')?this.pickTarget(e):null;
       if(!this.tgt&&this.mode==='mine')this.mouseMine=true;});
     window.addEventListener('mouseup',e=>{if(e.button!==0)return;this.mouseMine=false;
       if(this.tgt&&this.down&&Math.hypot(e.clientX-this.down[0],e.clientY-this.down[1])<8)this.activate(this.tgt);this.tgt=null;});
     this.el.addEventListener('loaded',()=>{
       this.rigEl=document.getElementById('rig');this.rig=this.rigEl.object3D;
-      this.camObj=document.getElementById('cam').object3D;
+      this.camEl=document.getElementById('cam');this.camObj=this.camEl.object3D;
+      // Desktop mouse-look is handled below; A-Frame look-controls would overwrite it.
+      if(!this.el.is('vr-mode'))this.camEl.removeAttribute('look-controls');
       this.amb=document.getElementById('amb').getObject3D('light');
       this.hands=['lh','rh'].map(id=>({el:document.getElementById(id),prev:new THREE.Vector3(),has:false,touch:false,hist:[],speed:0,inside:{}}));
       const l=this.hands[0].el;l.addEventListener('xbuttondown',()=>{this.xHeld=true;});l.addEventListener('xbuttonup',()=>{this.xHeld=false;});
@@ -160,8 +197,8 @@ AFRAME.registerComponent('gorilla',{
       this.buildAttach();this.ready=true;this.setMode('lobby',false);
       this.say('Poke CRAWL SPACE to begin. Explore for secrets!');
     });
-    this.el.addEventListener('enter-vr',()=>{document.getElementById('info').style.display='none';document.getElementById('xh').style.display='none';this.unlockAudio();this.setMode(this.mode,true);});
-    this.el.addEventListener('exit-vr',()=>{document.getElementById('info').style.display='block';document.getElementById('xh').style.display='block';this.setMode(this.mode,false);});
+    this.el.addEventListener('enter-vr',()=>{this.camEl.setAttribute('look-controls','');document.getElementById('info').style.display='none';document.getElementById('xh').style.display='none';this.unlockAudio();this.setMode(this.mode,true);});
+    this.el.addEventListener('exit-vr',()=>{this.camEl.removeAttribute('look-controls');this.mouseYaw=this.rig.rotation.y;document.getElementById('info').style.display='block';document.getElementById('xh').style.display='block';this.setMode(this.mode,false);});
   },
 
   /* ---------- save / audio ---------- */
@@ -199,7 +236,16 @@ AFRAME.registerComponent('gorilla',{
   },
   equip(id){this.save.e=this.save.e===id?'':id;this.setHat(this.save.e);this.persist();this.renderMenu();this.snd('click');},
 
-  /* ---------- lobby ---------- */
+  requestMouseLock(){
+    if(this.el.is('vr-mode'))return;
+    const canvas=this.el.canvas;
+    if(!canvas){this.say('Game is still loading.');return;}
+    try{
+      const p=canvas.requestPointerLock();
+      if(p&&p.catch)p.catch(()=>{this.pointerLockWanted=false;this.say('Click the game once, then press Left Ctrl.');});
+    }catch(e){this.pointerLockWanted=false;this.say('Click the game once, then press Left Ctrl.');}
+  },
+    /* ---------- lobby ---------- */
   buildLobby(){
     const R=this.root,g=this.lobby=new THREE.Group();R.add(g);
     const walls=new THREE.Group(),decor=new THREE.Group(),anim=this.anim=new THREE.Group();g.add(walls,decor,anim);
@@ -487,11 +533,49 @@ AFRAME.registerComponent('gorilla',{
     });
     this.espGroup.visible=false;
   },
+  /* ---------- trigger platforms ---------- */
+  buildTriggerPlatforms(){
+    this.triggerGroup=new THREE.Group();this.root.add(this.triggerGroup);
+    this.triggerPads=[];
+    const pads=[
+      {x:0,y:.08,z:8,mode:'lobby',color:0x00e5ff},
+      {x:9,y:1.25,z:5,mode:'lobby',color:0xff4fc8},
+      {x:11.2,y:2.45,z:1.8,mode:'lobby',color:0xff4fc8},
+      {x:4.5,y:.08,z:4.5,mode:'mine',color:0x66fff0},
+      {x:12.5,y:.08,z:12.5,mode:'mine',color:0xff4fc8},
+      {x:20.5,y:.08,z:20.5,mode:'mine',color:0xff4fc8}
+    ];
+    pads.forEach((p,i)=>{
+      const g=new THREE.Group();g.position.set(p.x,p.y,p.z);g.userData.mode=p.mode;g.userData.baseY=p.y;
+      const mat=new THREE.MeshStandardMaterial({color:p.color,emissive:p.color,emissiveIntensity:.65,transparent:true,opacity:.9});
+      const plate=new THREE.Mesh(new THREE.CylinderGeometry(.8,.8,.12,24),mat);g.add(plate);
+      const ring=new THREE.Mesh(new THREE.TorusGeometry(.68,.045,8,28),new THREE.MeshBasicMaterial({color:0xffffff}));ring.rotation.x=Math.PI/2;ring.position.y=.08;g.add(ring);
+      this.triggerGroup.add(g);this.triggerPads.push(g);
+    });
+    this.triggerGroup.visible=false;
+  },
+  updateTriggerPlatforms(dt){
+    if(!this.triggerGroup)return;
+    this.triggerCooldown=Math.max(0,this.triggerCooldown-dt);
+    this.triggerPads.forEach((p,i)=>{p.position.y=p.userData.baseY+.06+Math.sin(performance.now()*.002+i)*.04;});
+    if(!this.triggerPlatforms||this.triggerCooldown>0)return;
+    const pos=this.rig.position;
+    for(const pad of this.triggerPads){
+      if(pad.userData.mode!==this.mode)continue;
+      const dx=pos.x-pad.position.x,dz=pos.z-pad.position.z;
+      if(dx*dx+dz*dz<.8*.8&&Math.abs(pos.y-pad.position.y)<1.8){
+        this.triggerCooldown=1.2;
+        if(this.flyEnabled||this.noclip){this.rig.position.y+=2.2;}
+        else{this.vel.y=Math.max(this.vel.y,8.5);this.rig.position.y+=.2;}
+        this.say('TRIGGER PLATFORM!');this.snd('unlock');break;
+      }
+    }
+  },
   /* ---------- UI / panels ---------- */
   buildUI(){
     const m=this.menu=new Panel('menu',2.4,1.35,1024,576,'#7cf5c0');m.mesh.position.set(0,1.55,-6.2);this.lobby.add(m.mesh);this.panelOf.set(m.mesh,m);
     const mm=new THREE.Mesh(m.mesh.geometry,m.mesh.material);mm.position.copy(m.mesh.position);this.mir.add(mm);
-    const a=this.admin=new Panel('admin',1.5,1.9,700,900,'#ff9a5c');a.mesh.visible=false;this.root.add(a.mesh);this.panelOf.set(a.mesh,a);
+    const a=this.admin=new Panel('admin',1.5,2.1,700,1000,'#ff9a5c');a.mesh.visible=false;this.root.add(a.mesh);this.panelOf.set(a.mesh,a);
     this.renderMenu();
   },
   renderMenu(){
@@ -519,9 +603,10 @@ AFRAME.registerComponent('gorilla',{
       {x:30,y:434,w:640,h:76,label:'Noclip: '+(this.noclip?'ON':'OFF'),sub:'Pass through walls and move freely',on:()=>{this.noclip=!this.noclip;this.vel.set(0,0,0);this.renderAdmin();this.say(this.noclip?'Noclip enabled.':'Noclip disabled.');}},
       {x:30,y:518,w:640,h:76,label:'God Mode: '+(this.godMode?'ON':'OFF'),sub:'Prevent fall-out resets',on:()=>{this.godMode=!this.godMode;this.renderAdmin();}},
       {x:30,y:602,w:640,h:76,label:'Full Bright: '+(this.fullBright?'ON':'OFF'),sub:'Brighten the mine and torch',on:()=>{this.fullBright=!this.fullBright;this.renderAdmin();this.say(this.fullBright?'Full Bright enabled.':'Full Bright disabled.');}},
-      {x:30,y:686,w:310,h:76,label:'Refill Torch',sub:'Restore charge',on:()=>{this.charge=1;this.hudDirty=true;this.say('Torch fully charged.');}},
-      {x:360,y:686,w:310,h:76,label:'Go to Mine',sub:'Teleport',on:()=>this.startTeleport('mine')},
-      {x:30,y:772,w:640,h:76,label:this.mode==='mine'?'Return to Lobby':'Reset Position',on:()=>{if(this.mode==='mine')this.startTeleport('lobby');else this.setMode('lobby',this.el.is('vr-mode'));}}
+      {x:30,y:686,w:640,h:76,label:'Trigger Platforms: '+(this.triggerPlatforms?'ON':'OFF'),sub:'Glowing pads launch you when stepped on',on:()=>{this.triggerPlatforms=!this.triggerPlatforms;this.triggerGroup.visible=this.triggerPlatforms;this.renderAdmin();this.say(this.triggerPlatforms?'Trigger platforms enabled.':'Trigger platforms disabled.');}},
+      {x:30,y:770,w:310,h:76,label:'Refill Torch',sub:'Restore charge',on:()=>{this.charge=1;this.hudDirty=true;this.say('Torch fully charged.');}},
+      {x:360,y:770,w:310,h:76,label:'Go to Mine',sub:'Teleport',on:()=>this.startTeleport('mine')},
+      {x:30,y:854,w:640,h:76,label:this.mode==='mine'?'Return to Lobby':'Reset Position',on:()=>{if(this.mode==='mine')this.startTeleport('lobby');else this.setMode('lobby',this.el.is('vr-mode'));}}
     ];
     a.render();
   },
@@ -609,6 +694,7 @@ AFRAME.registerComponent('gorilla',{
     this.mode=m;this.lobby.visible=m==='lobby';this.mineG.visible=m==='mine';this.menu.mesh.visible=m==='lobby';
     this.closeAdmin();this.vel.set(0,0,0);this.grounded=false;
     if(this.espGroup)this.espGroup.visible=this.chestEsp;
+    if(this.triggerGroup)this.triggerGroup.visible=this.triggerPlatforms;
     const fog=this.root.fog;
     if(m==='lobby'){
       if(this.root.background&&this.root.background.set)this.root.background.set('#0b0f22');
@@ -763,6 +849,56 @@ AFRAME.registerComponent('gorilla',{
     if(!this.godMode&&(rig.position.y<-8||(this.mode==='mine'&&(rig.position.x<1||rig.position.z<1||rig.position.x>this.MX-1||rig.position.z>this.MZ-1))&&!this.noclip)){this.setMode(this.mode,this.el.is('vr-mode'));}
   },
 
+  /* ---------- lightweight online multiplayer ---------- */
+  makeRemote(id){
+    const g=new THREE.Group(),body=new THREE.Mesh(new THREE.CapsuleGeometry(.22,.65,4,8),new THREE.MeshStandardMaterial({color:0x47eaff,emissive:0x063344}));
+    body.position.y=.65;g.add(body);
+    const head=new THREE.Mesh(new THREE.SphereGeometry(.18,12,8),new THREE.MeshStandardMaterial({color:0xc7f7ff,emissive:0x123344}));
+    head.position.y=1.15;g.add(head);
+    const label=makeSign('PLAYER',.8,.22,'#8ff7ff','rgba(0,20,35,.9)');label.position.y=1.55;g.add(label);
+    this.root.add(g);this.remotePlayers.set(id,{group:g,label,body});return this.remotePlayers.get(id);
+  },
+  netMessage(msg){
+    if(!msg||!msg.id||msg.id===this.peer?.id)return;
+    if(msg.type==='state'){
+      const r=this.remotePlayers.get(msg.id)||this.makeRemote(msg.id);
+      r.group.visible=msg.mode===this.mode;
+      r.group.position.set(msg.x||0,msg.y||0,msg.z||0);
+      r.group.rotation.y=msg.ry||0;
+    }else if(msg.type==='leave'){
+      const r=this.remotePlayers.get(msg.id);if(r){this.root.remove(r.group);this.remotePlayers.delete(msg.id);}
+    }
+  },
+  connectRoom(code,host){
+    if(!window.Peer){this.say('Multiplayer needs internet to load PeerJS.');return;}
+    if(this.peer){try{this.peer.destroy();}catch(e){}}
+    this.peerConn=null;this.roomCode=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,10);
+    if(!this.roomCode){this.say('Enter a room code first.');return;}
+    const peerId='darkcrawl-'+this.roomCode.toLowerCase();
+    const p=this.peer=new Peer(host?peerId:undefined);
+    p.on('open',id=>{
+      this.say(host?'Room created: '+this.roomCode:'Connecting to room '+this.roomCode+'…');
+      if(!host){const c=p.connect(peerId,{reliable:true});this.attachPeerConnection(c);}
+    });
+    p.on('connection',c=>{if(host)this.attachPeerConnection(c);});
+    p.on('error',e=>this.say('Multiplayer error: '+(e.type||e.message||'connection failed')));
+    p.on('disconnected',()=>this.say('Multiplayer disconnected.'));
+  },
+  attachPeerConnection(c){
+    this.peerConn=c;
+    c.on('open',()=>this.say('Connected to another player!'));
+    c.on('data',d=>this.netMessage(d));
+    c.on('close',()=>{this.peerConn=null;this.say('Player disconnected.');});
+    c.on('error',()=>this.say('Multiplayer connection error.'));
+  },
+  updateMultiplayer(dt){
+    this.netTimer+=dt;
+    if(this.netTimer<.1)return;
+    this.netTimer=0;
+    if(!this.peerConn||!this.peerConn.open)return;
+    this.camObj.getWorldQuaternion(this.q);
+    this.peerConn.send({type:'state',id:this.peer?this.peer.id:'player',x:this.rig.position.x,y:this.rig.position.y,z:this.rig.position.z,ry:this.rig.rotation.y,mode:this.mode});
+  },
   /* ---------- per-frame systems ---------- */
   updateTorch(dt,vr){
     let shake=0;
@@ -869,7 +1005,7 @@ AFRAME.registerComponent('gorilla',{
     const dt=Math.min(ms/1000,.05)||.016,vr=this.el.is('vr-mode');
     this.animate(dt,t);this.updateFade(dt);
     if(vr)this.vrTick(dt);else this.pcTick(dt);
-    this.updateTorch(dt,vr);this.updateMine(dt,vr);this.updateUI(dt,vr);this.updateMirror();
+    this.updateTorch(dt,vr);this.updateMine(dt,vr);this.updateUI(dt,vr);this.updateMirror();this.updateTriggerPlatforms(dt);this.updateMultiplayer(dt);
   }
 });
 </script>
@@ -877,6 +1013,7 @@ AFRAME.registerComponent('gorilla',{
 <body>
 <div id="info"><b>Dark Crawl</b><br>Press the VR goggles button (bottom right) to play in VR. You hang low like a gorilla: reach down, push off surfaces with your hands, release to launch. Poke buttons with your hand.<br><b>In VR:</b> shake the LEFT controller to power the torch, swing the RIGHT pickaxe to mine, hold X for admin controls: Chest ESP, Fast Mine, Fly, Noclip, God Mode, Full Bright.<br><b>On PC:</b> drag to look, WASD move, Shift run, Space jump, click to poke or mine the block under the dot, hold F to shake the torch, hold X for admin controls. Noclip: WASD + Space/Ctrl; Shift speeds up.<br>Save data (cosmetics) is stored in this browser.</div>
 <div id="xh"></div>
+<div id="multiplayer" style="position:fixed;right:12px;top:12px;z-index:20;background:#080a1add;color:#fff;padding:10px;border:1px solid #47eaff;border-radius:10px;font:13px system-ui;max-width:230px"><b>ONLINE MULTIPLAYER (BETA)</b><div style="display:flex;gap:5px;margin-top:6px"><input id="roomCode" maxlength="10" placeholder="ROOM CODE" style="min-width:0;width:105px;text-transform:uppercase"><button id="hostRoom">Host</button><button id="joinRoom">Join</button></div><div id="netStatus" style="margin-top:5px;color:#9fefff">One room code, share it with a friend.</div></div>
 <a-scene gorilla fog="type:linear;color:#0b0f22;near:30;far:110" renderer="antialias:true" webxr="optionalFeatures:local-floor,bounded-floor" background="color:#0b0f22">
   <a-entity id="amb" light="type:ambient;color:#9aa6ff;intensity:0.95"></a-entity>
   <a-entity id="rig" position="0 0 8">
@@ -885,5 +1022,13 @@ AFRAME.registerComponent('gorilla',{
     <a-entity id="rh" oculus-touch-controls="hand:right;model:false"><a-sphere radius="0.05" color="#6a7aa8"></a-sphere></a-entity>
   </a-entity>
 </a-scene>
+<script>
+(function(){
+ const hostBtn=document.getElementById("hostRoom"),joinBtn=document.getElementById("joinRoom"),input=document.getElementById("roomCode"),status=document.getElementById("netStatus");
+ function game(){const s=document.querySelector("a-scene");return s&&s.components&&s.components.gorilla;}
+ function run(host){const g=game();if(!g){status.textContent="Game is still loading…";return;}let code=input.value.trim();if(host&&!code)code=Math.random().toString(36).slice(2,7).toUpperCase();input.value=code;status.textContent=host?"Creating room "+code+"…":"Joining room "+code+"…";g.connectRoom(code,host);}
+ hostBtn.addEventListener("click",()=>run(true));joinBtn.addEventListener("click",()=>run(false));
+})();
+</script>
 </body>
 </html>
