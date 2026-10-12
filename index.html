@@ -244,7 +244,7 @@ AFRAME.registerComponent('gorilla',{
     this.toast='';this.toastT=0;this.hudDirty=true;this.hudT=0;this.pressCool=0;
     this.spawnTicks=0;this.spawnHead=1.2;this.alarmT=0;this.partyT=0;this.nextDrip=4;this.nextKnock=35;
     this.mineCool=0;this.swing=0;this.mined=0;this.debris=[];this.needRebuild=false;
-    this.mouseMine=false;this.mouseFire=false;this.trig=false;this.fireCool=0;this.flashT=0;this.xHeld=false;this.adminOpen=false;this.craftOpen=false;
+    this.mouseMine=false;this.mouseFire=false;this.trig=false;this.fireCool=0;this.flashT=0;this.xHeld=false;this.adminOpen=false;this.craftOpen=false;this.jumpscareGun=false;this.gunAiming=false;this.gunLaser=null;this.monSyncT=0;this.monsterSnapshot=null;
     this.fadeState='idle';this.fadeA=0;this.ready=false;
     this.presses=0;this.quacks=0;this.discoN=0;this.mirrorN=0;this.hintI=0;this.cakeN=0;this.ufoN=0;this.mushN=0;this.jukeN=-1;this.arcN=0;this.tcool=0;
     this.tankN=0;this.vendN=0;this.scopeN=0;this.fountN=0;this.pseq=[];this.shelfOpen=false;this.clockSec=-1;
@@ -265,10 +265,11 @@ AFRAME.registerComponent('gorilla',{
     window.addEventListener('keydown',e=>{this.keys[e.code]=true;unlock();if(e.code==='Space')e.preventDefault();
       if(e.code==='KeyQ'&&!e.repeat&&this.ready)this.placeSlab(0,true);});
     window.addEventListener('keyup',e=>{this.keys[e.code]=false;if(e.code==='KeyQ')this.removeSlab(0);});
-    window.addEventListener('mousedown',e=>{if(e.button!==0)return;unlock();this.down=[e.clientX,e.clientY];
+    window.addEventListener('contextmenu',e=>e.preventDefault());
+    window.addEventListener('mousedown',e=>{if(e.button===2){if(this.jumpscareGun&&this.save.adm){this.gunAiming=true;this.say('Jumpscare gun aiming');}return;}if(e.button!==0)return;unlock();if(this.jumpscareGun&&this.gunAiming&&this.save.adm){this.fireJumpscareGun(false);return;}this.down=[e.clientX,e.clientY];
       this.tgt=this.ready&&!this.el.is('vr-mode')?this.pickTarget(e):null;
       if(!this.tgt){if(this.mode==='mine')this.mouseMine=true;else if(this.mode==='forest')this.mouseFire=true;}});
-    window.addEventListener('mouseup',e=>{if(e.button!==0)return;this.mouseMine=false;this.mouseFire=false;
+    window.addEventListener('mouseup',e=>{if(e.button===2){this.gunAiming=false;return;}if(e.button!==0)return;this.mouseMine=false;this.mouseFire=false;
       if(this.tgt&&this.down&&Math.hypot(e.clientX-this.down[0],e.clientY-this.down[1])<8)this.activate(this.tgt);this.tgt=null;});
     this.el.addEventListener('loaded',()=>{
       this.rigEl=document.getElementById('rig');this.rig=this.rigEl.object3D;
@@ -279,9 +280,9 @@ AFRAME.registerComponent('gorilla',{
       lh.addEventListener('xbuttondown',()=>{this.xHeld=true;});lh.addEventListener('xbuttonup',()=>{this.xHeld=false;});
       lh.addEventListener('thumbstickmoved',e=>{this.stick.lx=e.detail.x;this.stick.ly=e.detail.y;});
       rh.addEventListener('thumbstickmoved',e=>{this.stick.rx=e.detail.x;this.stick.ry=e.detail.y;});
-      [lh,rh].forEach((el,i)=>{el.addEventListener('gripdown',()=>this.placeSlab(i,false));el.addEventListener('gripup',()=>this.removeSlab(i));});
-      rh.addEventListener('triggerdown',()=>{this.trig=true;});rh.addEventListener('triggerup',()=>{this.trig=false;});
-      this.buildAttach();this.ready=true;this.setMode('lobby',false);
+      [lh,rh].forEach((el,i)=>{el.addEventListener('gripdown',()=>{if(i===1&&this.jumpscareGun&&this.save.adm){this.gunAiming=true;this.say('Jumpscare gun aiming');}else this.placeSlab(i,false);});el.addEventListener('gripup',()=>{if(i===1&&this.gunAiming){this.gunAiming=false;}else this.removeSlab(i);});});
+      rh.addEventListener('triggerdown',()=>{if(this.jumpscareGun&&this.gunAiming&&this.save.adm)this.fireJumpscareGun(true);else this.trig=true;});rh.addEventListener('triggerup',()=>{this.trig=false;});
+      this.buildAttach();this.buildGunLaser();this.ready=true;this.setMode('lobby',false);
       this.say('Poke a world to begin. Explore for secrets!');
     });
     this.el.addEventListener('enter-vr',()=>{document.getElementById('info').style.display='none';document.getElementById('xh').style.display='none';this.unlockAudio();this.setMode(this.mode,true);});
@@ -1257,16 +1258,58 @@ AFRAME.registerComponent('gorilla',{
       const vr=this.el.is('vr-mode');this.setMode(this.mode==='mine'?'lobby':this.mode,vr);}
   },
   updateLurkers(dt){
-    this.camObj.getWorldPosition(this.pw);const P=this.pw,dark=this.charge<.35;
+    this.camObj.getWorldPosition(this.pw);const P=this.pw;
     for(const e of this.eyes){
-      const d=e.position.distanceTo(P);e.visible=d>2.2;
-      if(d<22){
-        if(dark){this.v1.subVectors(P,e.position).normalize();e.position.addScaledVector(this.v1,1.3*dt);}
-        else if(d<10){this.v1.subVectors(e.position,P).normalize();e.position.addScaledVector(this.v1,1.8*dt);}
-      }
+      const home=e.userData.home||e.position;
+      const d=home.distanceTo(P);
+      // Red eyes vanish when the player gets close, then return at a distance.
+      e.visible=d>5.5;
+      e.position.copy(home);
       e.scale.y=Math.abs(Math.sin(performance.now()/1500+e.id))>.05?1:.1;
-      if(dark&&d<.9)this.jumpscare('lurker');
     }
+  },
+
+  buildGunLaser(){
+    const geo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3(0,0,-1)]);
+    this.gunLaser=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0xff2020,transparent:true,opacity:.9,depthTest:false}));
+    this.gunLaser.visible=false;this.root.add(this.gunLaser);
+  },
+  fireJumpscareGun(vr){
+    if(!this.save.adm||!this.jumpscareGun||!this.gunAiming)return;
+    const o=new THREE.Vector3(),d=new THREE.Vector3();
+    if(vr&&this.hands&&this.hands[1]){
+      const ctl=this.hands[1].el.object3D;ctl.getWorldPosition(o);ctl.getWorldQuaternion(this.q);
+    }else{this.camObj.getWorldPosition(o);this.camObj.getWorldQuaternion(this.q);}
+    d.set(0,0,-1).applyQuaternion(this.q).normalize();
+    let best=null,bestT=100;
+    for(const id in this.remotes){
+      const r=this.remotes[id];if(!r.has||r.mode!==this.mode)continue;
+      const target=r.head.position.clone().add(new THREE.Vector3(0,.02,0)),v=target.sub(o),t=v.dot(d);
+      if(t<0||t>bestT)continue;
+      const perp=v.addScaledVector(d,-t).length();
+      if(perp<.75){best=id;bestT=t;}
+    }
+    if(best){
+      this.snd('shot');this.netSend({t:'adminScare',target:best,kind:'smiler'});
+      if(this.net.host&&this.remotes[best])this.say('Jumpscare fired at '+this.remotes[best].name);
+      else this.say('Jumpscare sent!');
+    }else this.say('No player in the laser.');
+  },
+  updateGunLaser(){
+    if(!this.gunLaser)return;
+    const active=!!(this.jumpscareGun&&this.gunAiming&&this.save.adm&&this.online());
+    this.gunLaser.visible=active;
+    if(!active)return;
+    let o=new THREE.Vector3(),d=new THREE.Vector3();const vr=this.el.is('vr-mode');
+    if(vr&&this.hands&&this.hands[1]){this.hands[1].el.object3D.getWorldPosition(o);this.hands[1].el.object3D.getWorldQuaternion(this.q);}
+    else{this.camObj.getWorldPosition(o);this.camObj.getWorldQuaternion(this.q);}
+    d.set(0,0,-1).applyQuaternion(this.q).normalize();
+    let end=o.clone().addScaledVector(d,80),bt=80;
+    for(const id in this.remotes){const r=this.remotes[id];if(!r.has||r.mode!==this.mode)continue;
+      const v=r.head.position.clone().sub(o),t=v.dot(d);if(t<0||t>bt)continue;
+      if(v.addScaledVector(d,-t).length()<.75){bt=t;end=o.clone().addScaledVector(d,t);}
+    }
+    this.gunLaser.geometry.setFromPoints([o,end]);
   },
 
   /* ---------- networking ---------- */
@@ -1328,13 +1371,29 @@ AFRAME.registerComponent('gorilla',{
     if(!d.id||d.id===n.my)return;
     if(d.t==='hi'){const r=this.addRemote(d.id);r.name=cleanName(d.n);r.hat=HATS[d.h]?d.h:'';this.fillHat(r.hatSlot,r.hat);this.drawTag(r);this.refreshPlayers();if(this.voice.stream)this.voiceCall(d.id);}
     else if(d.t==='bye'){this.removeRemote(d.id);}
+    else if(d.t==='adminScare'){if(d.target===n.my){this.jumpscare('smiler');}}
     else if(d.t==='p'&&Array.isArray(d.hd)&&d.hd.length===7){
+      if(Array.isArray(d.ms)){this.applyMonsterSnapshot(d.ms);}
       const r=this.addRemote(d.id);r.mode=String(d.m);r.has=true;
       r.hp.set(+d.hd[0]||0,+d.hd[1]||0,+d.hd[2]||0);r.hq.set(+d.hd[3]||0,+d.hd[4]||0,+d.hd[5]||0,+d.hd[6]||1).normalize();
       for(let i=0;i<2;i++){const h=d.h&&d.h[i];if(Array.isArray(h)){r.ht[i].set(+h[0]||0,+h[1]||0,+h[2]||0);r.hh[i]=true;}else r.hh[i]=false;}
       if(!r.seen){r.seen=true;r.head.position.copy(r.hp);r.head.quaternion.copy(r.hq);r.ht.forEach((v,i)=>r.hands[i].position.copy(v));}}
     else if(d.t==='b'){const x=d.x|0,y=d.y|0,z=d.z|0;if(this.canMine(x,y,z))this.mineBlock(x,y,z,true);}
     else if(d.t==='mined'&&Array.isArray(d.l)){d.l.slice(0,4000).forEach(a=>{if(Array.isArray(a)){const x=a[0]|0,y=a[1]|0,z=a[2]|0;if(this.canMine(x,y,z))this.mineBlock(x,y,z,true);}});}
+  },
+  applyMonsterSnapshot(ms){
+    const lists={forest:this.mon,backrooms:this.bmon,school:this.gmon};
+    const all=[...this.mon,...this.bmon,...this.gmon];
+    for(const row of ms){const m=all[row.i];if(!m||!Array.isArray(row.p))continue;
+      m.g.position.set(+row.p[0]||0,+row.p[1]||0,+row.p[2]||0);
+      m.g.rotation.y=+row.r||0;
+      if(typeof row.v==='boolean')m.g.visible=row.v;
+      if(typeof row.d==='boolean')m.dead=row.d;
+    }
+  },
+  monsterSnapshot(){
+    const all=[...this.mon,...this.bmon,...this.gmon];
+    return all.map((m,i)=>({i,p:[+m.g.position.x.toFixed(2),+m.g.position.y.toFixed(2),+m.g.position.z.toFixed(2)],r:+m.g.rotation.y.toFixed(2),v:!!m.g.visible,d:!!m.dead}));
   },
   addRemote(id){
     let r=this.remotes[id];if(r)return r;
@@ -1380,6 +1439,7 @@ AFRAME.registerComponent('gorilla',{
     this.camObj.getWorldPosition(this.pw);this.camObj.getWorldQuaternion(this.q);
     const r2=v=>Math.round(v*100)/100,P=this.pw,Q=this.q;
     const m={t:'p',m:this.mode,hd:[r2(P.x),r2(P.y),r2(P.z),r2(Q.x),r2(Q.y),r2(Q.z),r2(Q.w)],h:[null,null]};
+    if(n.host){this.monSyncT-=dt;if(this.monSyncT<=0){this.monSyncT=.18;m.ms=this.monsterSnapshot();}}
     if(vr)this.hands.forEach((h,i)=>{if(h.has){const p=h.el.object3D.position;m.h[i]=[r2(p.x+this.rig.position.x),r2(p.y+this.rig.position.y),r2(p.z+this.rig.position.z)];}});
     this.netSend(m);
   },
@@ -1388,7 +1448,7 @@ AFRAME.registerComponent('gorilla',{
   buildUI(){
     const m=this.menu=new Panel('menu',2.8,1.575,1024,576,'#7cf5c0');m.mesh.position.set(0,1.55,-6.2);this.lobby.add(m.mesh);this.panelOf.set(m.mesh,m);
     const mm=new THREE.Mesh(m.mesh.geometry,m.mesh.material);mm.position.copy(m.mesh.position);this.mir.add(mm);
-    const a=this.admin=new Panel('admin',1.6,1.4,800,700,'#ff9a5c');a.mesh.visible=false;this.root.add(a.mesh);this.panelOf.set(a.mesh,a);
+    const a=this.admin=new Panel('admin',1.6,1.65,800,820,'#ff9a5c');a.mesh.visible=false;this.root.add(a.mesh);this.panelOf.set(a.mesh,a);
     const c=this.craft=new Panel('craft',1.8,1.2,900,600,'#ffd24a');c.mesh.visible=false;this.root.add(c.mesh);this.panelOf.set(c.mesh,c);
     this.renderMenu();this.refreshPlayers();
   },
@@ -1475,7 +1535,8 @@ AFRAME.registerComponent('gorilla',{
       a.btns.push({x:30,y:170,w:740,h:100,kind:'slider',label:'Speed x'+this.speed.toFixed(2),value:this.speed,min:.5,max:4,on:null});
       const T=(i,key,label)=>({x:30+(i%2)*375,y:285+Math.floor(i/2)*88,w:365,h:78,label:label+(c[key]?': ON':': OFF'),active:c[key],on:()=>this.toggleCheat(key)});
       [['plat','Platforms'],['noclip','Noclip'],['fly','Fly'],['esp','Chest ESP'],['fast','Fast mine'],['bright','FullBright'],['mesp','Monster ESP']].forEach((q,i)=>a.btns.push(T(i,q[0],q[1])));
-      a.btns.push({x:405,y:285+3*88,w:365,h:78,label:'< BACK',on:()=>{this.spage='main';this.renderAdmin();}});
+      a.btns.push({x:30,y:285+4*88,w:740,h:78,label:'Jumpscare Gun: '+(this.jumpscareGun?'ON':'OFF'),active:this.jumpscareGun,sub:'Grip / right-click to aim; trigger / click to fire',on:()=>{this.jumpscareGun=!this.jumpscareGun;this.gunAiming=false;this.say('Jumpscare gun '+(this.jumpscareGun?'enabled':'disabled'));this.renderAdmin();}});
+      a.btns.push({x:405,y:285+5*88,w:365,h:78,label:'< BACK',on:()=>{this.spage='main';this.renderAdmin();}});
     }else if(pg==='code'){
       a.title='ENTER CODE';a.sub='code: '+(this.codeBuf+'____').slice(0,4);
       ['1','2','3','4','5','6','7','8','9','DEL','0','GO'].forEach((k,i)=>a.btns.push({x:30+(i%3)*250,y:170+Math.floor(i/3)*85,w:240,h:75,label:k,big:k==='GO',
@@ -1912,10 +1973,10 @@ AFRAME.registerComponent('gorilla',{
     if(!this.ready)return;
     const dt=Math.min(ms/1000,.05)||.016,vr=this.el.is('vr-mode');
     this.animate(dt,t);this.updateFade(dt);this.updateDebris(dt);
-    if(this.scare){this.updateScare(dt);this.updateUI(dt,vr);this.updateRemotes(dt);this.netTick(dt,vr);return;}
+    if(this.scare){this.updateScare(dt);this.updateUI(dt,vr);this.updateRemotes(dt);this.updateGunLaser();this.netTick(dt,vr);return;}
     if(vr)this.vrTick(dt);else this.pcTick(dt);
     this.updateTorch(dt,vr);this.updateMine(dt,vr);this.updateForest(dt,t,vr);this.updateBack(dt,t);this.updateSchool(dt,t);this.updateUI(dt,vr);this.updateMirror();
-    this.updateRemotes(dt);this.netTick(dt,vr);this.applyBright();
+    this.updateRemotes(dt);this.updateGunLaser();this.netTick(dt,vr);this.applyBright();
   }
 });
 </script>
